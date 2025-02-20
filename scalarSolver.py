@@ -1,93 +1,5 @@
 import numpy as np
 from scipy.integrate import solve_ivp
-from types import FunctionType as function
-
-class mesh:
-
-    # Define Mesh properties
-    # number of cells inside the domain
-    nps : int 
-    # number of total cells, including ghost cells
-    nps_tot : int
-    # domain length
-    L0 : float
-
-    # Number of ghost cells on each side
-    nghost : int = 1
-
-    # vertex positions, length = nps+2*nghost+1
-    xv_ : np.array
-    # cell cennter positions, length = nps+2*nghost
-    xc_ : np.array
-    # cell size, length = nps+2*nghost
-    dx_init : float
-    dx_ : np.array
-    inidx_ : np.array   # store content of L0 in the cell
-
-    def __init__(self, nps:int, x_left:float, x_right:float):
-        self.nps = nps
-        self.nps_tot = nps + self.nghost*2
-        self.L0 = x_right - x_left
-        self.xv_ = np.zeros(nps+self.nghost*2+1)
-        self.xc_ = np.zeros(nps+self.nghost*2)
-        self.dx_ = np.zeros(nps+self.nghost*2)
-        self.dx_init = self.L0/nps
-
-        dx = self.L0/nps
-        for i in range(nps+self.nghost*2+1):
-            self.xv_[i] = x_left + (i-self.nghost)*dx
-        for i in range(nps+self.nghost*2):
-            self.xc_[i] = (self.xv_[i]+self.xv_[i+1])/2
-            self.dx_[i] = self.xv_[i+1]-self.xv_[i]
-        self.inidx_ = self.dx_.copy()
-
-    # expand or shrink the mesh for one cell
-    # boundary: 'left' or 'right'
-    # direction: 'expand' or 'shrink'
-    def adjustMesh(self, boundary:str, direction:str):
-        if direction=='expand':
-            a = 1
-        elif direction=='shrink':
-            a = -1
-        else:
-            print("Direction is not defined")
-        self.nps += a; self.nps_tot += a; self.L0 += a*self.dx_
-        xv_old = self.xv_.copy()
-        if boundary == 'left':
-            if a == 1:
-                self.xv_ = np.insert(self.xv_, 0, self.xv_[0]-self.dx_)
-            elif a == -1:
-                self.xv_ = np.delete(self.xv_, [0])
-        elif boundary == 'right':
-            if a == 1:
-                self.xv_ = np.append(self.xv_, self.xv_[-1]+self.dx_)
-            elif a == -1:
-                self.xv_ = np.delete(self.xv_, [-1])
-        else:
-            print("Boundary is not defined")
-
-        self.xc_ = (self.xv_[:-1]+self.xv_[1:])/2
-        self.dx_ = self.xv_[1:]-self.xv_[:-1]
-
-    # def reconstructFromdx(self, lrFix:str):
-    #     # if fix left boundary position
-    #     if lrFix == 'left':
-    #         xv_new = np.zeros(self.nps+self.nghost*2)
-    #         xv_new[1] = self.xv_[1] ; xv_new[0] = self.xv_[1] - self.dx_[0]
-    #         for i in range(2, self.nps+self.nghost*2):
-    #             xv_new[i] = xv_new[i-1] + self.dx_[i-1]
-    #         for i in range(self.nps+self.nghost*2):
-    #             self.xc_[i] = (self.xv_[i]+self.xv_[i+1])/2
-    #     # if fix right boundary position
-    #     elif lrFix == 'right':
-    #         xv_new = np.zeros(self.nps+self.nghost*2)
-    #         xv_new[-2] = self.xv_[-2] ; xv_new[-1] = self.xv_[-2] + self.dx_[-1]
-    #         for i in range(self.nps+self.nghost*2-2, -1, -1):
-    #             xv_new[i] = xv_new[i+1] - self.dx_[i]
-    #         for i in range(self.nps+self.nghost*2):
-    #             self.xc_[i] = (self.xv_[i]+self.xv_[i+1])/2
-    #     else:
-    #         print("Boundary is not defined")
 
 # A Timer class to record the time
 class Timer:
@@ -115,11 +27,11 @@ class Timer:
 
     def increment(self):
         # check CFL
-        if self.CFL_list is not None:
-            cfl = max(self.CFL_list)
-            if cfl > 1:
-                print("CFL number is larger than 1, please reduce the time step")
-                self.dt = self.dt/cfl
+        # if self.CFL_list is not None:
+        #     cfl = max(self.CFL_list)
+        #     if cfl > 1:
+        #         print("CFL number is larger than 1, please reduce the time step")
+        #         self.dt = self.dt/cfl
         self.CFL_list = []
 
         self.cur_time += self.dt
@@ -132,130 +44,207 @@ class Timer:
         return (int(self.cur_time*multi+0.5)%int(self.write_interval*multi+0.5) == 0)
 
 
-# This is a scalar solver class to solver 1-D scalar equation with moving bounndary
-class mbScalarSolver:
-    # Define mesh
-    msh : mesh
-    # Define Timer
-    timer : Timer
-    # Number of cells
-    nps : int
+class MovingBoundarySolver:
+    """
+    Using ALE method to solve the scalar transport equation with moving boundary
 
-    # Define initial properties
-    init_x_left : float
-    init_x_right : float
+    Initial PDE:
+        ∂y/∂t + v(x,t) ∂y/∂x = D_12(ξ,t) ∂²y/∂x²
+        x from S_left(t) to S_right(t)
+    Let:
+        x(ξ,t) = S_left(t) + ξ [S_right(t) - S_left(t)] ; ξ ∈ [0,1]
+    Then:
+        ∂Y/∂t + u_eff(ξ,t) ∂Y/∂ξ = D_eff(ξ,t) ∂²Y/∂ξ²
+    where:
+        J = S_right(t) - S_left(t)
+        mesh velocity : w(ξ,t) = v_left(t) + ξ [v_right(t)-v_left(t)]
+        u_eff = (v(x,t)-w(ξ,t)) / J
+        D_eff = D(x,t) / J^2
 
-    # Define working arrays
-    # Scalar field, length = nps+2*nghost
-    phi : np.array
-    phi_old : np.array
-    # Residual of the scalar field, length = nps+2*nghost
-    # res : np.array
-    # left boundary position
-    x_left : float
-    # right boundary position
-    x_right : float
+    - 边界条件 bc_left, bc_right：字典格式，必须包含 "type"（"Dirichlet" 或 "Neumann"）
+         以及 "value"（函数，接收当前时间 t 返回边界值或边界导数）
+    
+    """
 
-    # Define boundary conditions
-    # left boundary condition       {type: 'dirichlet' or 'neumann', value: float}
-    bc_left : dict = None
-    # right boundary condition      {type: 'dirichlet' or 'neumann', value: float}
-    bc_right : dict = None
+    nps : int                   # number of points in the domain
+    timer : Timer = None        # Timer class
 
-    # function to get the residual of the scalar field
-    getResidual : callable = None
+    # Initial condition
+    S_left0 : float = 0.0       # initial left boundary
+    S_right0 : float = 1.0      # initial right boundary
 
-    def __init__(self, nps:int, x_left:float, x_right:float, timer:Timer):
+    # Working Arrays
+    y : np.ndarray = None       # scalar field
+    y_old : np.ndarray = None   # scalar field at previous time step
+    ksi_c : np.ndarray = None   # cell-centered points
+    ksi_f : np.ndarray = None   # cell-faced points
+    dksi : np.ndarray = None    # cell size
+    dksi_c : np.ndarray = None  # cell-centered cell size, consider ghost cells
+    x_c : np.ndarray = None     # cell-centered physical points
+    x_f : np.ndarray = None     # cell-faced physical points
+    v : np.ndarray = None       # velocity field, cell-faced
+    D : np.ndarray = None       # diffusion coefficient field, cell-faced
+    
+    S_left : float              # left boundary
+    S_right : float             # right boundary
+    V_left : float = 0.0            # left velocity
+    V_right : float = 0.0            # right velocity
+
+    # Boundary conditions
+    # in form of {"type": "Dirichlet", "value": 1.0}
+    # "type" can be "Dirichlet" or "Neumann"
+    # if Neumann, "value" is D*dy/dx
+    bc_left : dict = None       # left boundary condition
+    bc_right : dict = None      # right boundary condition
+
+    def __init__(self,
+                 nps:int,
+                 S_left0:float,
+                 S_right0:float,
+                 timer:Timer):
         self.nps = nps
-        self.x_left = x_left
-        self.x_right = x_right
-
-        self.init_x_left = x_left
-        self.init_x_right = x_right
-
         self.timer = timer
+        self.S_left0 = S_left0  # initial left boundary
+        self.S_right0 = S_right0 # initial right boundary
+        self.S_left = S_left0 ; self.S_right = S_right0
 
-        # Initialize mesh
-        self.msh = mesh(nps, x_left, x_right)
+        self.y = np.zeros(nps+2)    # scalar field add two ghost points
+        self.y_old = np.zeros(nps+2) # scalar field at previous time step
+        self.ksi_f = np.linspace(0,1,nps+1)     # excluding ghost points
+        self.ksi_c = 0.5*(self.ksi_f[1:] + self.ksi_f[:-1])
+        self.dksi = self.ksi_f[1:] - self.ksi_f[:-1]
+        temp = np.zeros(nps+2) ; temp[1:-1] = self.ksi_c
+        temp[0] = 2*self.ksi_f[0] - self.ksi_c[0] ; temp[-1] = 2*self.ksi_f[-1] - self.ksi_c[-1]
+        self.dksi_c = temp[1:] - temp[:-1]
+        self.x_f = np.zeros(nps+1)
+        self.x_c = np.zeros(nps)
+        self.v = np.zeros(nps+1) 
+        self.D = np.zeros(nps+1)
 
-        # Initialize scalar field
-        self.phi = np.zeros(nps+self.msh.nghost*2)
+        # compute physical points
+        self.updatePhysicalPoints()
 
-    # Set callable function to get the residual of the scalar field
-    def setResidualFunction(self, func:function):
-        self.getResidual = func
+    def updatePhysicalPoints(self):
+        self.x_f = self.S_left + self.ksi_f*(self.S_right-self.S_left)
+        self.x_c = 0.5*(self.x_f[1:] + self.x_f[:-1])
 
-    # Set boundary conditions
-    def setBoundaryConditions(self, bc_left:dict, bc_right:dict):
+    def setBoundaryCondition(self, bc_left:dict, bc_right:dict):
         self.bc_left = bc_left
         self.bc_right = bc_right
 
-    # Apply boundary conditions
-    def applyBoundaryConditions(self):
-        if self.bc_left is None:
-            print("Left boundary condition is not set")
-        if self.bc_right is None:
-            print("Right boundary condition is not set")
+    def updateDiffusionCoefficient(self, D:np.ndarray):
+        if (D.shape[0] != self.nps+1):
+            raise ValueError("Diffusion coefficient array size mismatch")
+        self.D = D
 
-        if self.bc_left['type'] == 'dirichlet':
-            # set the value of left ghost cell from the left boundary condition and left boundary position
-            value = self.bc_left['value']
-            a = (self.msh.xc_[1]-self.msh.xc_[0])/(self.msh.xc_[1]-self.x_left)
-            self.phi[0] = self.phi[1] + a*(value - self.phi[1])
-        elif self.bc_left['type'] == 'neumann':
-            # set the value of left ghost cell from the left boundary condition and left boundary position
-            value = self.bc_left['value']
-            self.phi[0] = self.phi[1] - value*(self.msh.xc_[1]-self.msh.xc_[0])
+    def updateVelocity(self, v:np.ndarray):
+        if (v.shape[0] != self.nps+1):
+            raise ValueError("Velocity array size mismatch")
+        self.v = v
+
+    def updateBoundaryVelocity(self, V_left:float, V_right:float):
+        self.V_left = V_left
+        self.V_right = V_right
+
+    def applyBC(self):
+        if (self.bc_left==None) or (self.bc_right==None):
+            raise ValueError("Boundary conditions not set")
+        
+        if self.bc_left["type"] == "Dirichlet":
+            value = self.bc_left["value"]
+            self.y[0] = 2*value - self.y[1]
+        elif self.bc_left["type"] == "Neumann":
+            value = self.bc_left["value"]
+            # convert dy/dx to dy/dξ
+            dksi = self.ksi_f[1] - self.ksi_f[0]
+            J = self.S_right - self.S_left
+            D = self.D[0]
+            self.y[0] = self.y[1] - value*dksi*J/D
         else:
-            print("Left boundary condition type is not defined")
-
-        if self.bc_right['type'] == 'dirichlet':
-            # set the value of right ghost cell from the right boundary condition and right boundary position
-            value = self.bc_right['value']
-            a = (self.msh.xc_[-1]-self.msh.xc_[-2])/(self.msh.xc_[-1]-self.x_right)
-            self.phi[-1] = a*(value - self.phi[-2])+self.phi[-2]
-        elif self.bc_right['type'] == 'neumann':
-            # set the value of right ghost cell from the right boundary condition and right boundary position
-            value = self.bc_right['value']
-            self.phi[-1] = self.phi[-2] + value*(self.msh.xc_[-1]-self.msh.xc_[-2])
+            raise ValueError("Unknown boundary condition type")
+        
+        if self.bc_right["type"] == "Dirichlet":
+            value = self.bc_right["value"]
+            self.y[-1] = 2*value - self.y[-2]
+        elif self.bc_right["type"] == "Neumann":
+            value = self.bc_right["value"]
+            # convert dy/dx to dy/dξ
+            dksi = self.ksi_f[-1] - self.ksi_f[-2]
+            J = self.S_right - self.S_left
+            D = self.D[-1]
+            self.y[-1] = self.y[-2] + value*dksi*J/D
         else:
-            print("Right boundary condition type is not defined")
+            raise ValueError("Unknown boundary condition type")
+        
+    def getResidual(self, t:float, y:np.ndarray):
+        # The input y is the scalar field inside domain with length nps
+        y_ = np.zeros(self.nps+2) ; y_[1:-1] = y
+        y_[0] = self.y[0] ; y_[-1] = self.y[-1]
+        # Compute residual
+        # ∂Y/∂t = D_eff(ξ,t) ∂²Y/∂ξ² - u_eff(ξ,t) ∂Y/∂ξ
 
-    # Solve the scalar field for a time step
-    def solve(self):
+        # Prepare parameters
+        J = self.S_right - self.S_left
+        um = (1-self.ksi_f)*self.V_left + self.ksi_f*self.V_right
+        u_eff = (self.v - um) / J
+        D_eff = self.D / J**2
+        
+        # Conpute Flux
+        # 1st order numerical method to compute diffusive flux across cell faces
+        # len(flux) = n+1
+        flux = D_eff*(y_[1:] - y_[:-1])/self.dksi_c
+        # 1st order numerical method to compute advective flux across cell faces
+        # interpolate to get cell-faced y
+        flux = flux - u_eff*0.5*(y_[1:] + y_[:-1])
+        # Compute residual
+        # len(residual) = nps
+        residual = (flux[1:] - flux[:-1])/self.dksi
+
+        return residual
+    
+    def step(self):
         curtime = self.timer.cur_time
         dt = self.timer.dt
-        self.phi_old = self.phi.copy()
-        sol = solve_ivp(self.getResidual, [curtime , curtime +dt], self.phi, method='RK45', t_eval=[curtime+dt])
-        self.phi = sol.y[:,0]
 
-    # V_right is the velocity of the right boundary
-    def mvb1(self, V_right:float):
-        right_old = self.x_right
-        right_new = right_old + V_right*self.timer.dt
-        self.timer.CFL_list.append(V_right*self.timer.dt/self.msh.dx_[-1])
+        # update boundary position
+        self.S_left = self.S_left + self.V_left*dt
+        self.S_right = self.S_right + self.V_right*dt
+        self.updatePhysicalPoints()
 
-        # check if the right boundary is out of the center of ghost cell, if yes, expand the mesh
-        if (right_new > self.msh.xc_[-1]):
-            phi1 = self.phi[-2] ; xc1 = self.msh.xc_[-2]
-            phiS = self.bc_right['value'] ; xcS = right_new
-            xc2 = self.msh.xc_[-1]
-            # use interpolate to get the value of phi2 at xc2, its in between phi1 and phiS
-            phi2 = phi1 + (phiS-phi1)*(xc2-xc1)/(xcS-xc1)
-            self.phi[-1] = phi2
-            # expand the mesh and add new ghost cell to phi
-            self.msh.adjustMesh('right', 'expand')
-            self.phi = np.append(self.phi, 0)
-            self.x_right = right_new
-        # check if the right boundary is inside the center of first cell in the domain, if yes, shrink the mesh
-        elif (right_new < self.msh.xc_[-2]):
-            self.msh.adjustMesh('right', 'shrink')
-            self.phi = np.delete(self.phi, -1)
-            self.x_right = right_new
-        else:
-            self.x_right = right_new
+        # rememeber old value
+        self.y_old = np.copy(self.y)
 
+        # Get in-domain y
+        y = self.y.copy()[1:-1]
+        # Solve the PDE
+        sol = solve_ivp(self.getResidual, [curtime, curtime+dt], y, method='RK45', t_eval=[curtime+dt])
+        
+        # Update y
+        self.y[1:-1] = sol.y[:,0]
+
+        # Apply boundary conditions
+        self.applyBC()
+
+
+        
+
+
+
+
+if __name__ == "__main__":
+    N = 50
+    timer = Timer(0,0.5,0.00005,0.1)
+    solver = MovingBoundarySolver(N,0,1,timer)
+    solver.setBoundaryCondition({"type":"Neumann","value":0.0},{"type":"Dirichlet","value":1.0})
+    solver.updateVelocity(np.zeros(N+1))
+    D = np.ones(N+1)
+    solver.updateDiffusionCoefficient(D)
+    solver.updateBoundaryVelocity(0.0,0.0)
+    while not timer.isEnd():
+        if timer.isWrite():
+            print(f"t = {timer.cur_time}")
+        solver.step()
+        timer.increment()
+    print(solver.x_c)
+    print(solver.y[1:-1])
     
-        # Apply boundary conditions 
-        self.applyBoundaryConditions()
-            
