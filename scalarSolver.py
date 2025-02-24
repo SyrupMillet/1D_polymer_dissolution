@@ -176,6 +176,7 @@ class MovingBoundarySolver:
         else:
             raise ValueError("Unknown boundary condition type")
         
+        
     def getResidual(self, t:float, y:np.ndarray):
         # The input y is the scalar field inside domain with length nps
         y_ = np.zeros(self.nps+2) ; y_[1:-1] = y
@@ -186,30 +187,46 @@ class MovingBoundarySolver:
         # Prepare parameters
         J = self.S_right - self.S_left
         um = (1-self.ksi_f)*self.V_left + self.ksi_f*self.V_right
-        u_eff = (self.v - um) / J
-        D_eff = self.D / J**2
+        u_eff = (self.v - um)
+        D_eff = self.D
         
         # Conpute Flux
         # 1st order numerical method to compute diffusive flux across cell faces
         # len(flux) = n+1
-        flux = D_eff*(y_[1:] - y_[:-1])/self.dksi_c
+        flux = D_eff*(y_[1:] - y_[:-1]) / self.dksi_c / J
         # 1st order numerical method to compute advective flux across cell faces
         # interpolate to get cell-faced y
         flux = flux - u_eff*0.5*(y_[1:] + y_[:-1])
         # Compute residual
         # len(residual) = nps
-        residual = (flux[1:] - flux[:-1])/self.dksi
+        residual = (flux[1:] - flux[:-1]) / self.dksi / J
 
-        return residual
+        fluxl = -D_eff[0]*(y_[1] - y_[0])/self.dksi_c[0]/J + u_eff[0]*0.5*(y_[1] + y_[0])
+        
+        fluxr = -D_eff[-1]*(y_[-1] - y_[-2])/self.dksi_c[-1]/J + u_eff[-1]*0.5*(y_[-1] + y_[-2])
+
+        return residual, fluxl, fluxr
+
+
+
+    def updateBoundaryPosition(self):
+        curtime = self.timer.cur_time
+        dt = self.timer.dt
+        # old field length
+        Lold = self.S_right - self.S_left
+        # update boundary position
+        self.S_left = self.S_left + self.V_left*dt
+        self.S_right = self.S_right + self.V_right*dt
+        # new field length
+        Lnew = self.S_right - self.S_left
+        # update physical points
+        self.updatePhysicalPoints()
+        # adjust the scalar field to ensure their amount is the same before and after stretching the cell
+        self.y[1:-1] = self.y[1:-1] * Lold / Lnew
     
     def step(self):
         curtime = self.timer.cur_time
         dt = self.timer.dt
-
-        # update boundary position
-        self.S_left = self.S_left + self.V_left*dt
-        self.S_right = self.S_right + self.V_right*dt
-        self.updatePhysicalPoints()
 
         # rememeber old value
         self.y_old = np.copy(self.y)
@@ -217,13 +234,15 @@ class MovingBoundarySolver:
         # Get in-domain y
         y = self.y.copy()[1:-1]
         # Solve the PDE
-        sol = solve_ivp(self.getResidual, [curtime, curtime+dt], y, method='RK45', t_eval=[curtime+dt])
+        # sol = solve_ivp(self.getResidual, [curtime, curtime+dt], y, method='RK45', t_eval=[curtime+dt])
         
         # Update y
-        self.y[1:-1] = sol.y[:,0]
+        # self.y[1:-1] = sol.y[:,0]
 
-        # Apply boundary conditions
-        self.applyBC()
+        # explicit Euler
+        self.y[1:-1] = y + dt*self.getResidual(curtime, y)[0]
+
+        
 
 
         
