@@ -1,5 +1,4 @@
 import numpy as np
-from scipy.integrate import solve_ivp
 
 # A Timer class to record the time
 class Timer:
@@ -40,8 +39,11 @@ class Timer:
         return self.cur_time >= self.end_time
     
     def isWrite(self):
-        multi = int(1/self.dt+0.5)
-        return (int(self.cur_time*multi+0.5)%int(self.write_interval*multi+0.5) == 0)
+        if (self.dt < 1.0):
+            multi = int(1/self.dt+0.5)
+            return (int(self.cur_time*multi+0.5)%int(self.write_interval*multi+0.5) == 0)
+        else:
+            return (int(self.cur_time)%int(self.write_interval) == 0)
 
 
 class MovingBoundarySolver:
@@ -61,8 +63,8 @@ class MovingBoundarySolver:
         u_eff = (v(x,t)-w(ξ,t)) / J
         D_eff = D(x,t) / J^2
 
-    - 边界条件 bc_left, bc_right：字典格式，必须包含 "type"（"Dirichlet" 或 "Neumann"）
-         以及 "value"（函数，接收当前时间 t 返回边界值或边界导数）
+    - boundary condition bc_left, bc_right: dictionary format, must contain "type" ("Dirichlet" or "Neumann")
+            and "value" (function, receive current time t and return boundary value or boundary derivative)
     
     """
 
@@ -76,12 +78,14 @@ class MovingBoundarySolver:
     # Working Arrays
     y : np.ndarray = None       # scalar field
     y_old : np.ndarray = None   # scalar field at previous time step
+
     ksi_c : np.ndarray = None   # cell-centered points
     ksi_f : np.ndarray = None   # cell-faced points
     dksi : np.ndarray = None    # cell size
-    dksi_c : np.ndarray = None  # cell-centered cell size, consider ghost cells
+
     x_c : np.ndarray = None     # cell-centered physical points
     x_f : np.ndarray = None     # cell-faced physical points
+
     v : np.ndarray = None       # velocity field, cell-faced
     D : np.ndarray = None       # diffusion coefficient field, cell-faced
     
@@ -108,16 +112,13 @@ class MovingBoundarySolver:
         self.S_right0 = S_right0 # initial right boundary
         self.S_left = S_left0 ; self.S_right = S_right0
 
-        self.y = np.zeros(nps+2)    # scalar field add two ghost points
-        self.y_old = np.zeros(nps+2) # scalar field at previous time step
+        self.y = np.zeros(nps+3)    # scalar field add two ghost points
+        self.y_old = np.zeros(nps+3) # scalar field at previous time step
         self.ksi_f = np.linspace(0,1,nps+1)     # excluding ghost points
-        self.ksi_c = 0.5*(self.ksi_f[1:] + self.ksi_f[:-1])
-        self.dksi = self.ksi_f[1:] - self.ksi_f[:-1]
-        temp = np.zeros(nps+2) ; temp[1:-1] = self.ksi_c
-        temp[0] = 2*self.ksi_f[0] - self.ksi_c[0] ; temp[-1] = 2*self.ksi_f[-1] - self.ksi_c[-1]
-        self.dksi_c = temp[1:] - temp[:-1]
+
+        self.dksi = 1/nps
         self.x_f = np.zeros(nps+1)
-        self.x_c = np.zeros(nps)
+
         self.v = np.zeros(nps+1) 
         self.D = np.zeros(nps+1)
 
@@ -146,83 +147,72 @@ class MovingBoundarySolver:
         self.V_left = V_left
         self.V_right = V_right
 
+    # if is Nuemann BC, value is D*dy/dx 
     def applyBC(self):
         if (self.bc_left==None) or (self.bc_right==None):
             raise ValueError("Boundary conditions not set")
         
         if self.bc_left["type"] == "Dirichlet":
             value = self.bc_left["value"]
-            self.y[0] = 2*value - self.y[1]
+            self.y[0] = value
+            self.y[1] = value
         elif self.bc_left["type"] == "Neumann":
             value = self.bc_left["value"]
             # convert dy/dx to dy/dξ
-            dksi = self.ksi_f[1] - self.ksi_f[0]
-            J = self.S_right - self.S_left
+            dksi = self.dksi
+            S = self.S_right - self.S_left
             D = self.D[0]
-            self.y[0] = self.y[1] - value*dksi*J/D
+            self.y[0] = self.y[2] + 2*dksi*value*S/D
         else:
             raise ValueError("Unknown boundary condition type")
         
         if self.bc_right["type"] == "Dirichlet":
             value = self.bc_right["value"]
-            self.y[-1] = 2*value - self.y[-2]
+            self.y[-2] = value
+            self.y[-1] = value
         elif self.bc_right["type"] == "Neumann":
             value = self.bc_right["value"]
             # convert dy/dx to dy/dξ
-            dksi = self.ksi_f[-1] - self.ksi_f[-2]
-            J = self.S_right - self.S_left
+            dksi = self.dksi
+            S = self.S_right - self.S_left
             D = self.D[-1]
-            self.y[-1] = self.y[-2] + value*dksi*J/D
+            self.y[-1] = self.y[-3] - 2*dksi*value*S/D
         else:
             raise ValueError("Unknown boundary condition type")
         
         
-    def getResidual(self, t:float, y:np.ndarray):
-        # The input y is the scalar field inside domain with length nps
-        y_ = np.zeros(self.nps+2) ; y_[1:-1] = y
-        y_[0] = self.y[0] ; y_[-1] = self.y[-1]
-        # Compute residual
-        # ∂Y/∂t = D_eff(ξ,t) ∂²Y/∂ξ² - u_eff(ξ,t) ∂Y/∂ξ
-
+    def getResidual(self):
         # Prepare parameters
-        J = self.S_right - self.S_left
-        um = (1-self.ksi_f)*self.V_left + self.ksi_f*self.V_right
-        u_eff = (self.v - um)
-        D_eff = self.D
-        
-        # Conpute Flux
-        # 1st order numerical method to compute diffusive flux across cell faces
-        # len(flux) = n+1
-        flux = D_eff*(y_[1:] - y_[:-1]) / self.dksi_c / J
-        # 1st order numerical method to compute advective flux across cell faces
-        # interpolate to get cell-faced y
-        flux = flux - u_eff*0.5*(y_[1:] + y_[:-1])
-        # Compute residual
-        # len(residual) = nps
-        residual = (flux[1:] - flux[:-1]) / self.dksi / J
+        S_m = self.S_right - self.S_left
 
-        fluxl = -D_eff[0]*(y_[1] - y_[0])/self.dksi_c[0]/J + u_eff[0]*0.5*(y_[1] + y_[0])
+        um = (1-self.ksi_f)*self.V_left + self.ksi_f*self.V_right
+        u_eff = (self.v - um)/S_m
+
+        D_eff = self.D/S_m**2
         
-        fluxr = -D_eff[-1]*(y_[-1] - y_[-2])/self.dksi_c[-1]/J + u_eff[-1]*0.5*(y_[-1] + y_[-2])
+        y = self.y # including ghost points
+        
+        # Compute residual
+        diffuseRes = D_eff*(y[2:] - 2*y[1:-1] + y[:-2])/(self.dksi**2)
+        advectRes = u_eff*(y[2:] - y[:-2])/(2*self.dksi)
+        residual = -advectRes + diffuseRes
+
+        # Compute flux
+        fluxr = (3*y[-2] - 4*y[-3] + y[-4])/(2*self.dksi)/S_m
+        fluxl = (3*y[1] - 4*y[2] + y[3])/(2*self.dksi)/S_m
 
         return residual, fluxl, fluxr
 
 
 
     def updateBoundaryPosition(self):
-        curtime = self.timer.cur_time
         dt = self.timer.dt
-        # old field length
-        Lold = self.S_right - self.S_left
         # update boundary position
         self.S_left = self.S_left + self.V_left*dt
         self.S_right = self.S_right + self.V_right*dt
-        # new field length
-        Lnew = self.S_right - self.S_left
         # update physical points
         self.updatePhysicalPoints()
-        # adjust the scalar field to ensure their amount is the same before and after stretching the cell
-        self.y[1:-1] = self.y[1:-1] * Lold / Lnew
+
     
     def step(self):
         curtime = self.timer.cur_time
@@ -231,39 +221,99 @@ class MovingBoundarySolver:
         # rememeber old value
         self.y_old = np.copy(self.y)
 
-        # Get in-domain y
-        y = self.y.copy()[1:-1]
-        # Solve the PDE
-        # sol = solve_ivp(self.getResidual, [curtime, curtime+dt], y, method='RK45', t_eval=[curtime+dt])
-        
-        # Update y
-        # self.y[1:-1] = sol.y[:,0]
+        y = self.y[1:-1]
 
         # explicit Euler
-        self.y[1:-1] = y + dt*self.getResidual(curtime, y)[0]
-
-        
+        self.y[1:-1] = y + dt*self.getResidual()[0]
 
 
-        
-
+    def getCFL(self):
+        S_m = self.S_right - self.S_left
+        dt = self.timer.dt
+        dksi = self.dksi
+        return 2*dt/(dksi**2*S_m**2)
 
 
 
 if __name__ == "__main__":
-    N = 50
-    timer = Timer(0,0.5,0.00005,0.1)
-    solver = MovingBoundarySolver(N,0,1,timer)
-    solver.setBoundaryCondition({"type":"Neumann","value":0.0},{"type":"Dirichlet","value":1.0})
-    solver.updateVelocity(np.zeros(N+1))
-    D = np.ones(N+1)
-    solver.updateDiffusionCoefficient(D)
-    solver.updateBoundaryVelocity(0.0,0.0)
+    """
+    Here is an example to stefan problem
+        dU/dt = d²U/dx², 0<x<S(t), t>0
+    with boundary conditions:
+        dU/dx = -exp(t), at x=0
+        U = 0, at x=S(t)
+    and initial
+        U = 0, 0<x<S(0)
+
+    The boundary moves with
+        dS/dt = -dU/dx|_{x=S(t)}
+        S(t=0) = 0
+
+    The exact solution is
+        U = exp(t-x)-1, 0<x<S(t), 0<t<1
+        S(t) = t
+    
+    """
+    L1 = 0.0005    # Initial length
+    nps1 = 20    # number of numerical points
+
+    # Define the time parameters
+    timer = Timer(0.0, 0.5, 0.0000000001, 0.01)
+
+    # initailize the inside diffusion domain
+    solver1 = MovingBoundarySolver(nps1, 0, L1, timer)
+    # initiate field
+    solver1.y.fill(0.0)
+
+    # Initiate the velocity field and diffusion coefficient field
+    v1 = np.zeros_like(solver1.x_f)
+    Dcoef1 = np.zeros_like(solver1.x_f)
+
+    Dcoef1.fill(1.0)
+
+    solver1.updateVelocity(v1)
+    solver1.updateDiffusionCoefficient(Dcoef1)
+
+    solver1.updateBoundaryVelocity(0.0, 0.0)
+    solver1.updateBoundaryPosition()
+
+    solver1.setBoundaryCondition(\
+        {"type":"Neumann","value":(np.exp(timer.cur_time))},\
+        {"type":"Dirichlet","value":0.0})
+    solver1.applyBC()
+
+    # print initial CFL
+    print(f"CFL = {solver1.getCFL()}")
+
     while not timer.isEnd():
         if timer.isWrite():
             print(f"t = {timer.cur_time}")
-        solver.step()
+            print(f"x = {solver1.x_f}")
+            print(f"y = {solver1.y[1:-1]}")
+
+        # Get dU/dx at S
+        dUdx = solver1.getResidual()[2]
+
+        solver1.step()
+
+        solver1.updateBoundaryVelocity(0.0, -dUdx)
+
+        solver1.updateBoundaryPosition()
+
+        solver1.setBoundaryCondition(\
+        {"type":"Neumann","value":(np.exp(timer.cur_time))},\
+        {"type":"Dirichlet","value":0.0})
+        solver1.applyBC()
+
+        # dynamic time step
+        S_m = solver1.S_right - solver1.S_left
+        dt = 0.25*solver1.dksi**2*S_m**2
+        timer.dt = dt
         timer.increment()
-    print(solver.x_c)
-    print(solver.y[1:-1])
+
+    # print final result and compare with exact solution
+    print(f"t = {timer.cur_time}")
+    print(f"x = {solver1.x_f}")
+    print(f"y = {solver1.y[1:-1]}")
+    print(f"Exact = {np.exp(timer.cur_time-solver1.x_f)-1}")
     

@@ -25,8 +25,8 @@ class Parameters:
     # average bond length [m]
     abl = 0.154E-9
 
-    D0 = 4.0E-14    # [m^2/s]
-    ad = 7
+    D0 = 1.1E-14    # [m^2/s]
+    ad = 20
 
     # Solvent viscosity
     eta1 = 0.4E-3   # [Pa.s]
@@ -39,6 +39,10 @@ class Parameters:
         self.rg = 0.408248*self.abl*self.N_dp**0.5
         # D2 coefficient [m^2/s]
         self.A = 4.8157E-4*self.T/self.eta1*self.N_dp**(-2.4)
+        # Critical volume fraction
+        self.cri_frac = (self.MW*10**-3)/(self.NA*self.rg**3*3/4*np.pi) / (self.rho_p*10**3)
+        print("Critical volume fraction: ", self.cri_frac)
+
 
     # solve chemical potential equilibrium equation at the gel-solvent interface S
     def getPhi1Minus(self) -> float:
@@ -52,6 +56,7 @@ class Parameters:
             a = np.log(phi1) + (1-1/self.xn)*(1-phi1) + x*(1-phi1)**2 + v1*rho2*phi2*(2.0/mc-1/m)*(2/phi2-phi2)
             return a
         return brentq(f1, 0.001, 0.999)
+
     
     # Get inside region diffusion coefficient [m^2/s]
     def getD12(self, phi) -> float:
@@ -70,9 +75,6 @@ class Parameters:
     def getRepTime(self, phi2) -> float:
         trep = 0.01368*self.eta1/self.T*phi2**1.9*self.N_dp**3.4
 
-        # Boltzmann constant [J/K]
-        kb = 1.38E-23
-
         return trep
     
     # Get disentanglement rate [m/s]
@@ -87,3 +89,4 @@ if __name__ == "__main__":
     a = para.getPhi1Minus()
     print(a)
     print(para.getRepTime((1-a)))
+    print(para.getKd(1-a))
