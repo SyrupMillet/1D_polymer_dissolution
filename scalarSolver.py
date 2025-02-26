@@ -185,7 +185,8 @@ class MovingBoundarySolver:
         # Prepare parameters
         S_m = self.S_right - self.S_left
 
-        um = (1-self.ksi_f)*self.V_left + self.ksi_f*self.V_right
+        um = self.V_left + self.ksi_f*(self.V_right-self.V_left)
+
         u_eff = (self.v - um)/S_m
 
         D_eff = self.D/S_m**2
@@ -194,12 +195,17 @@ class MovingBoundarySolver:
         
         # Compute residual
         diffuseRes = D_eff*(y[2:] - 2*y[1:-1] + y[:-2])/(self.dksi**2)
-        advectRes = u_eff*(y[2:] - y[:-2])/(2*self.dksi)
+        if (self.V_right > 0):
+            yprim = y[1:]
+            advectRes = u_eff*(yprim[1:] - yprim[:-1])/(2*self.dksi)
+        else:
+            yprim = y[:-1]
+            advectRes = u_eff*(yprim[1:] - yprim[:-1])/(2*self.dksi)
         residual = -advectRes + diffuseRes
 
         # Compute flux
-        fluxr = (3*y[-2] - 4*y[-3] + y[-4])/(2*self.dksi)/S_m
-        fluxl = (3*y[1] - 4*y[2] + y[3])/(2*self.dksi)/S_m
+        fluxr = self.D[-2]*(3*y[-2] - 4*y[-3] + y[-4])/(2*self.dksi)/S_m
+        fluxl = self.D[1]*(3*y[1] - 4*y[2] + y[3])/(2*self.dksi)/S_m
 
         return residual, fluxl, fluxr
 

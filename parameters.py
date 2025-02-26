@@ -25,8 +25,8 @@ class Parameters:
     # average bond length [m]
     abl = 0.154E-9
 
-    D0 = 1.1E-14    # [m^2/s]
-    ad = 20
+    D0 = 4.0E-14    # [m^2/s]
+    ad = 7
 
     # Solvent viscosity
     eta1 = 0.4E-3   # [Pa.s]
@@ -41,7 +41,6 @@ class Parameters:
         self.A = 4.8157E-4*self.T/self.eta1*self.N_dp**(-2.4)
         # Critical volume fraction
         self.cri_frac = (self.MW*10**-3)/(self.NA*self.rg**3*3/4*np.pi) / (self.rho_p*10**3)
-        print("Critical volume fraction: ", self.cri_frac)
 
 
     # solve chemical potential equilibrium equation at the gel-solvent interface S

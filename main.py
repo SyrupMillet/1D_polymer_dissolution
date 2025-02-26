@@ -5,13 +5,13 @@ from scalarSolver import Timer, MovingBoundarySolver
 
 # Define the main polymer parameters
 L1 = 0.005    # Initial polymer length [m]
-nps1 = 20    # number of numerical points
+nps1 = 50    # number of numerical points
 L2 = 0.05*L1    # length of diffusion layer [m]
 nps2 = 5    # number of numerical points in diffusion layer
 
 
 # Define the time parameters
-timer = Timer(0.0, 2400, 0.05, 100)
+timer = Timer(0.0, 10000, 0.1, 100)
 
 # Define the parameters
 para = Parameters()
@@ -58,24 +58,48 @@ solver2.applyBC()
 
 # Get some parameters
 trep = para.getRepTime((1-phi1Minus))
-Kd = -para.getKd(1-phi1Minus)
+Kd = para.getKd(1-phi1Minus)
 
 phi2OutInt = 0.0
+
+# print initial CFL
+print(f"CFL1 = {solver1.getCFL()}")
+print(f"CFL2 = {solver2.getCFL()}")
+
+# prepare output
+out = out_class("gnuplot")
+out.addOutput("inside_phi1.txt")
+out.addOutput("outside_phi2.txt")
+out.addOutput("output.txt")
+
+out.addDataList("time", 0)
+out.addDataList("S", 0)
+out.addDataList("phi2OutFrac", 0)
+out.addDataList("phi1", nps1+1)
+out.addDataList("phi2", nps2+1)
+
+out.bindDataToFile("inside_phi1.txt", "time", "phi1")
+out.bindDataToFile("outside_phi2.txt", "time", "phi2")
+out.bindDataToFile("output.txt", "time", "S", "phi2OutFrac")
+
+out.initOutput()
 
 while not timer.isEnd():
 
     # get phi1 inflow flux at S-
-    phi1Inflow = solver1.getResidual(timer.cur_time, solver1.y[1:-1])[2]
+    phi1Inflow = solver1.getResidual()[2]
     # get phi2 inflow flux at S+
-    phi2Inflow = solver2.getResidual(timer.cur_time, solver2.y[1:-1])[1]
+    phi2Inflow = solver2.getResidual()[1]
     # get phi2 outflow flux at S+\delta
-    phi2Outflow = solver2.getResidual(timer.cur_time, solver2.y[1:-1])[2]
+    phi2Outflow = solver2.getResidual()[2]
+
+    print()
 
     solver1.step()
     solver2.step()
 
     # combine the flux to get S moving velocity
-    vs = -phi1Inflow - phi2Inflow/phi1Minus
+    vs = phi1Inflow - phi2Inflow/phi1Minus
 
     # update moving boundary velocity
     solver1.updateBoundaryVelocity(0.0,vs)
@@ -95,7 +119,7 @@ while not timer.isEnd():
     # update boundary condition in solver2
     if (timer.cur_time > trep):
         # Get left boundary phi2 in solver2
-        phi2Left = 0.5*(solver2.y[0]+solver2.y[1])
+        phi2Left = solver2.y[1]
         if (phi2Left < (1-phi1Minus)):
             # phi2 hasnt reached the equilibrium value at S, the boundary flux equal to disentanglement rate
             solver2.setBoundaryCondition(\
@@ -113,11 +137,14 @@ while not timer.isEnd():
 
     # Compute total amount of polymer in inside domain
     phi2 = 1.0 - solver1.y[1:-1]
+    phi2 = 0.5*(phi2[1:]+phi2[:-1])
     IntPhi2 = np.sum(phi2*(solver1.x_f[1:]-solver1.x_f[:-1]))
     # Compute total amount of polymer in outside domain
-    IntPhi2_2 = np.sum(solver2.y[1:-1]*(solver2.x_f[1:]-solver2.x_f[:-1]))
+    phi2_2 = solver2.y[1:-1]
+    phi2_2 = 0.5*(phi2_2[1:]+phi2_2[:-1])
+    IntPhi2_2 = np.sum(phi2_2*(solver2.x_f[1:]-solver2.x_f[:-1]))
     # Compute total amount of polymer flow out
-    phi2OutInt += phi2Outflow*timer.dt
+    phi2OutInt += -phi2Outflow*timer.dt
 
     phi2totalratio = (IntPhi2+IntPhi2_2+phi2OutInt)/L1
 
@@ -125,15 +152,9 @@ while not timer.isEnd():
     timer.increment()
 
     if (timer.isWrite()):
-        print(f"t = {timer.cur_time}")
-        print(solver1.D)
-        print(solver2.D)
-
-print(solver1.S_right/0.005)
-print(phi2OutInt/L1)
-
-# plot the result
-import matplotlib.pyplot as plt
-plt.plot(solver2.x_c, solver2.y[1:-1], label='phi1')
-plt.legend()
-plt.show()
+        out.appendData("time", format(timer.cur_time, ".2f"))
+        out.appendData("S", format(solver1.S_right, ".8f"))
+        out.appendData("phi2OutFrac", format(phi2OutInt/L1, ".8f"))
+        out.appendData("phi1", solver1.y[1:-1])
+        out.appendData("phi2", solver2.y[1:-1])
+        out.updateOutput()
